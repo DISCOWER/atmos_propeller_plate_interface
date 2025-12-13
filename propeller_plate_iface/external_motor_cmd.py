@@ -42,12 +42,12 @@ class ActuatorCommandPublisher(Node):
 
         self.publisher = self.create_publisher(
             VehicleCommand,
-            '/fmu/in/vehicle_command',
+            'fmu/in/vehicle_command',
             qos_profile_pub
         )
         self.subscriber = self.create_subscription(
             Float32MultiArray,
-            '/prop_plate/external_motor_cmd',
+            'prop_plate/external_motor_cmd',
             self.listener_callback,
             10
         )
