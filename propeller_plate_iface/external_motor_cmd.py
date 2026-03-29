@@ -11,6 +11,11 @@ class ActuatorCommandPublisher(Node):
     def __init__(self):
         super().__init__('actuator_command_publisher')
 
+        # Hysteresis state: 1 for positive, -1 for negative, 0 for zero/unknown
+        self.hysteresis_state = [0.0, 0.0, 0.0, 0.0]
+        # Hysteresis threshold (N)
+        self.hysteresis_threshold = 0.05
+
         # Get polynomial coefficients from parameters or use defaults
         self.declare_parameter("positive_thrust_curve", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.declare_parameter("negative_thrust_curve", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -30,20 +35,20 @@ class ActuatorCommandPublisher(Node):
         self.get_logger().info(f"Loaded negative thrust curve: {self.negative_thrust_curve}")
 
         # Timeout for arriving messages
-        self.timeout = 0.05  # seconds
+        self.timeout = 0.5  # seconds
 
         # QoS profiles
-        qos_profile_pub = QoSProfile(
+        qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             history=QoSHistoryPolicy.KEEP_LAST,
-            depth=10
+            depth=1
         )
 
         self.publisher = self.create_publisher(
             VehicleCommand,
             'fmu/in/vehicle_command',
-            qos_profile_pub
+            qos_profile
         )
         self.subscriber = self.create_subscription(
             Float32MultiArray,
@@ -72,34 +77,46 @@ class ActuatorCommandPublisher(Node):
     def get_ppm_from_forces(self, forces):
         # Convert desired forces (N) to PWM signals (us)
         normalized_pwm = [0.0] * 4
-        for i, thrust in enumerate(forces):
+        for i, thrust in enumerate(forces):            
+            # Hysteresis logic
+            state = self.hysteresis_state[i]
+            threshold = self.hysteresis_threshold
+            if state >= 0:
+                # Only switch to negative if below -threshold
+                if thrust < -threshold:
+                    self.hysteresis_state[i] = -1
+                else:
+                    self.hysteresis_state[i] = 1 if thrust > threshold else state
+            if state <= 0:
+                # Only switch to positive if above +threshold
+                if thrust > threshold:
+                    self.hysteresis_state[i] = 1
+                else:
+                    self.hysteresis_state[i] = -1 if thrust < -threshold else state
+
             # Simple linear mapping for demonstration purposes
             # Assuming force range: 0N to 10N maps to PWM: 1000us to 2000us
             pwm = 0.0
-            if thrust > 0.0:
-                pwm = (
-                    self.positive_thrust_curve[0]
-                    + self.positive_thrust_curve[1] * thrust**1
-                    + self.positive_thrust_curve[2] * thrust**2
-                    + self.positive_thrust_curve[3] * thrust**3
-                    + self.positive_thrust_curve[4] * thrust**4
-                    + self.positive_thrust_curve[5] * thrust**5
-                )
-                pwm = max(0.0, min(0.8, pwm))
-                pwm = pwm / 0.8  # Normalize to [0, 1] due to thrust imbalance
-            else:
-                pwm = (
-                    self.negative_thrust_curve[0]
-                    + self.negative_thrust_curve[1] * thrust**1
-                    + self.negative_thrust_curve[2] * thrust**2
-                    + self.negative_thrust_curve[3] * thrust**3
-                    + self.negative_thrust_curve[4] * thrust**4
-                    + self.negative_thrust_curve[5] * thrust**5
-                )
-                pwm = max(-1.0, min(0.0, pwm))
-            normalized_pwm[i] = pwm
-            return normalized_pwm
 
+            # Use the direction to select curve
+            if self.hysteresis_state[i] == 1:
+                # Positive curve
+                t = max(thrust, 0.0)
+                for k in range(len(self.positive_thrust_curve)):
+                    pwm += self.positive_thrust_curve[k] * (t ** k)
+                pwm = max(0.0, min(0.8, pwm))
+            elif self.hysteresis_state[i] == -1:
+                # Negative curve
+                t = min(thrust, 0.0)
+                for k in range(len(self.negative_thrust_curve)):
+                    pwm += self.negative_thrust_curve[k] * (t ** k)
+                pwm = max(-1.0, min(0.0, pwm))
+            else:
+                pwm = 0.0
+            normalized_pwm[i] = pwm
+        
+        return normalized_pwm
+    
     def publish_command(self):
         msg = VehicleCommand()
         msg.timestamp = int(self.get_clock().now().nanoseconds)
