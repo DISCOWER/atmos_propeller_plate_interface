@@ -87,7 +87,7 @@ class ActuatorCommandPublisher(Node):
                     self.hysteresis_state[i] = -1
                 else:
                     self.hysteresis_state[i] = 1 if thrust > threshold else state
-            if state <= 0:
+            else:
                 # Only switch to positive if above +threshold
                 if thrust > threshold:
                     self.hysteresis_state[i] = 1
