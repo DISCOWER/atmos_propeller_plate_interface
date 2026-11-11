@@ -5,6 +5,9 @@ from std_msgs.msg import Float32MultiArray
 from px4_msgs.msg import VehicleCommand
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
+TIMEOUT = 1.0  # seconds
+HYSTERESIS_THRESHOLD = 0.05  # N
+
 
 class ActuatorCommandPublisher(Node):
 
@@ -13,8 +16,6 @@ class ActuatorCommandPublisher(Node):
 
         # Hysteresis state: 1 for positive, -1 for negative, 0 for zero/unknown
         self.hysteresis_state = [0.0, 0.0, 0.0, 0.0]
-        # Hysteresis threshold (N)
-        self.hysteresis_threshold = 0.05
 
         # Get polynomial coefficients from parameters or use defaults
         self.declare_parameter("positive_thrust_curve", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -33,9 +34,6 @@ class ActuatorCommandPublisher(Node):
         )
         self.get_logger().info(f"Loaded positive thrust curve: {self.positive_thrust_curve}")
         self.get_logger().info(f"Loaded negative thrust curve: {self.negative_thrust_curve}")
-
-        # Timeout for arriving messages
-        self.timeout = 0.5  # seconds
 
         # QoS profiles
         qos_profile = QoSProfile(
@@ -75,24 +73,25 @@ class ActuatorCommandPublisher(Node):
         self.received_data = msg.data
 
     def get_ppm_from_forces(self, forces):
-        # Convert desired forces (N) to PWM signals (us)
+        # Convert desired forces (N) to normalized actuator commands
         normalized_pwm = [0.0] * 4
-        for i, thrust in enumerate(forces):            
-            # Hysteresis logic
+        threshold = HYSTERESIS_THRESHOLD
+
+        for i, thrust in enumerate(forces):
+            # Below threshold: stop the propeller and clear the direction memory,
+            # otherwise the polynomial's constant term would keep it at idle thrust
+            if abs(thrust) < threshold:
+                self.hysteresis_state[i] = 0
+                normalized_pwm[i] = 0.0
+                continue
+
             state = self.hysteresis_state[i]
-            threshold = self.hysteresis_threshold
+
+            # Hysteresis: only change direction once past the opposite threshold
             if state >= 0:
-                # Only switch to negative if below -threshold
-                if thrust < -threshold:
-                    self.hysteresis_state[i] = -1
-                else:
-                    self.hysteresis_state[i] = 1 if thrust > threshold else state
+                self.hysteresis_state[i] = -1 if thrust < -threshold else 1
             else:
-                # Only switch to positive if above +threshold
-                if thrust > threshold:
-                    self.hysteresis_state[i] = 1
-                else:
-                    self.hysteresis_state[i] = -1 if thrust < -threshold else state
+                self.hysteresis_state[i] = 1 if thrust > threshold else -1
 
             # Simple linear mapping for demonstration purposes
             # Assuming force range: 0N to 10N maps to PWM: 1000us to 2000us
@@ -128,11 +127,12 @@ class ActuatorCommandPublisher(Node):
         msg.param7 = 0.0
         index = int(msg.param7 + 0.5)
 
-        if (self.get_clock().now().nanoseconds / 1e9 - self.data_timestamp) < self.timeout and self.received_data is not None:
+        if (self.get_clock().now().nanoseconds / 1e9 - self.data_timestamp) < TIMEOUT and self.received_data is not None:
             desired_forces = self.received_data
             _normalized_input = self.get_ppm_from_forces(desired_forces)
         else:
-            _normalized_input = [0.0, 0.0, 0.0, 0.0]
+            _normalized_input = [0.0] * 4
+            self.hysteresis_state = [0.0] * 4
 
         # Fill vehicle command with data
         msg.param1 = _normalized_input[0]
